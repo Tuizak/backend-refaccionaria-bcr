@@ -736,25 +736,54 @@ const crearCompatibilidad = async (req, res) => {
       });
     }
 
+    const anioInicio = Number(anio);
+    const anioFin = anio_fin ? Number(anio_fin) : null;
+    const totalAnios = anioFin ? (anioFin - anioInicio + 1) : 1;
+
+    if (totalAnios > 1) {
+      const insertIdMin = await db.query(
+        `SELECT IFNULL(MAX(id_compatibilidad), 0) + 1 AS next_id FROM producto_compatibilidades`
+      );
+      let nextId = insertIdMin[0][0].next_id;
+
+      const values = [];
+      for (let a = anioInicio; a <= anioFin; a++) {
+        values.push([id, id_marca, id_modelo, a, null, motor || null, version || null, notas || null, 1]);
+      }
+
+      await db.query(
+        `INSERT INTO producto_compatibilidades
+          (id_producto, id_marca, id_modelo, anio, anio_fin, motor, version, notas, activo)
+         VALUES ?`,
+        [values]
+      );
+
+      return res.status(201).json({
+        mensaje: `Compatibilidad agregada: ${totalAnios} años (${anioInicio}–${anioFin})`,
+        anios_creados: totalAnios,
+      });
+    }
+
     const [resultado] = await db.query(
       `
       INSERT INTO producto_compatibilidades
         (id_producto, id_marca, id_modelo, anio, anio_fin, motor, version, notas, activo)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
       `,
-      [id, id_marca, id_modelo, anio, anio_fin || null, motor || null, version || null, notas || null]
+      [id, id_marca, id_modelo, anio, null, motor || null, version || null, notas || null]
     );
 
     return res.status(201).json({
       mensaje: "Compatibilidad agregada correctamente",
       id_compatibilidad: resultado.insertId,
+      anios_creados: 1,
     });
   } catch (error) {
     console.error("Error al crear compatibilidad:", error);
 
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
-        mensaje: "Ya existe esta compatibilidad para el producto",
+        mensaje: "Una o más compatibilidades ya existían para este producto. Se insertaron las que faltaban.",
       });
     }
 
