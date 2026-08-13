@@ -7,6 +7,7 @@ const pool = require("../config/db");
  */
 const buildImageUrl = (req, imagePath) => {
   if (!imagePath) return "";
+  if (/^https?:\/\//i.test(imagePath)) return imagePath;
   return `${req.protocol}://${req.get("host")}${imagePath}`;
 };
 
@@ -98,6 +99,7 @@ const createPromocion = async (req, res) => {
       precioAnterior,
       whatsappMensaje,
       linkProducto,
+      imagenUrl,
       fechaInicio,
       fechaFin,
       prioridad,
@@ -118,14 +120,14 @@ const createPromocion = async (req, res) => {
       });
     }
 
-    if (!req.file) {
-      return res.status(400).json({
-        ok: false,
-        message: "La imagen es obligatoria",
-      });
-    }
+    /* La imagen puede venir como archivo, URL externa o no venir (opcional) */
+    let imagePath = "";
 
-    const imagePath = `/uploads/promociones/${req.file.filename}`;
+    if (req.file) {
+      imagePath = `/uploads/promociones/${req.file.filename}`;
+    } else if (imagenUrl && imagenUrl.trim()) {
+      imagePath = imagenUrl.trim();
+    }
 
     const [result] = await pool.query(
       `
@@ -239,17 +241,30 @@ const updatePromocion = async (req, res) => {
       precioAnterior,
       whatsappMensaje,
       linkProducto,
+      imagenUrl,
       fechaInicio,
       fechaFin,
       prioridad,
       activa,
     } = req.body;
 
-    let imagePath = existing.imagen_url;
+    const esImagenLocal = /^https?:\/\//i.test(existing.imagen_url || "") === false && !!existing.imagen_url;
+    let imagePath = existing.imagen_url || "";
 
     if (req.file) {
-      await removeFileIfExists(existing.imagen_url);
+      if (esImagenLocal) await removeFileIfExists(existing.imagen_url);
       imagePath = `/uploads/promociones/${req.file.filename}`;
+    } else if (imagenUrl !== undefined) {
+      const nuevo = String(imagenUrl).trim();
+      if (nuevo) {
+        if (esImagenLocal && nuevo !== existing.imagen_url) {
+          await removeFileIfExists(existing.imagen_url);
+        }
+        imagePath = nuevo;
+      } else {
+        if (esImagenLocal) await removeFileIfExists(existing.imagen_url);
+        imagePath = "";
+      }
     }
 
     await pool.query(

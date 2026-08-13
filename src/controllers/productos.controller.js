@@ -186,36 +186,94 @@ const crearProducto = async (req, res) => {
   }
 };
 
-/* PUT /api/productos/:id */
+/* PUT /api/productos/:id
+   Actualización parcial: solo sobrescribe los campos que vienen en el body.
+   Si SKU/nombre/categoría no se envían, se conservan los valores existentes,
+   así "dejar igual" el formulario nunca genera errores de obligatoriedad. */
 const actualizarProducto = async (req, res) => {
   try {
     const { id } = req.params;
+    const body = req.body || {};
 
-    const {
-      sku,
-      nombre,
-      descripcion_corta,
-      descripcion_larga,
-      marca_producto,
-      precio_base,
-      mostrar_precio,
-      id_categoria,
-      requiere_vehiculo,
-      mensaje_whatsapp,
-      destacado,
-      activo,
-    } = req.body;
-
-    if (!sku || !nombre || !id_categoria) {
+    /* Validar solo los campos que sí se están intentando cambiar */
+    if (body.sku !== undefined && !String(body.sku).trim()) {
       return res.status(400).json({
-        mensaje: "SKU, nombre y categoría son obligatorios",
+        mensaje: "El SKU no puede estar vacío",
       });
     }
+    if (body.nombre !== undefined && !String(body.nombre).trim()) {
+      return res.status(400).json({
+        mensaje: "El nombre no puede estar vacío",
+      });
+    }
+    if (body.id_categoria !== undefined && !Number(body.id_categoria)) {
+      return res.status(400).json({
+        mensaje: "Selecciona una categoría válida",
+      });
+    }
+
+    const [existe] = await db.query(
+      "SELECT * FROM productos WHERE id_producto = ? LIMIT 1",
+      [id]
+    );
+
+    if (existe.length === 0) {
+      return res.status(404).json({
+        mensaje: "Producto no encontrado",
+      });
+    }
+
+    const actual = existe[0];
+
+    const sku = body.sku !== undefined ? String(body.sku).trim() : actual.sku;
+    const nombre =
+      body.nombre !== undefined ? String(body.nombre).trim() : actual.nombre;
+    const id_categoria =
+      body.id_categoria !== undefined
+        ? Number(body.id_categoria)
+        : actual.id_categoria;
 
     const slugBase = crearSlug(nombre);
     const slug = `${slugBase}-${id}`;
 
-    const [resultado] = await db.query(
+    const descripcion_corta =
+      body.descripcion_corta !== undefined
+        ? body.descripcion_corta || null
+        : actual.descripcion_corta;
+    const descripcion_larga =
+      body.descripcion_larga !== undefined
+        ? body.descripcion_larga || null
+        : actual.descripcion_larga;
+    const marca_producto =
+      body.marca_producto !== undefined
+        ? body.marca_producto || null
+        : actual.marca_producto;
+    const precio_base =
+      body.precio_base !== undefined
+        ? body.precio_base || null
+        : actual.precio_base;
+    const mostrar_precio =
+      body.mostrar_precio !== undefined
+        ? body.mostrar_precio
+          ? 1
+          : 0
+        : actual.mostrar_precio;
+    const requiere_vehiculo =
+      body.requiere_vehiculo !== undefined
+        ? body.requiere_vehiculo
+          ? 1
+          : 0
+        : actual.requiere_vehiculo;
+    const mensaje_whatsapp =
+      body.mensaje_whatsapp !== undefined
+        ? body.mensaje_whatsapp || null
+        : actual.mensaje_whatsapp;
+    const destacado =
+      body.destacado !== undefined ? (body.destacado ? 1 : 0) : actual.destacado;
+    const activo =
+      body.activo !== undefined ? (body.activo ? 1 : 0) : actual.activo;
+
+    await db.query(
       `
       UPDATE productos
       SET
@@ -235,28 +293,22 @@ const actualizarProducto = async (req, res) => {
       WHERE id_producto = ?
       `,
       [
-        sku.trim(),
+        sku,
         slug,
-        nombre.trim(),
-        descripcion_corta || null,
-        descripcion_larga || null,
-        marca_producto || null,
-        precio_base || null,
-        mostrar_precio ? 1 : 0,
-        Number(id_categoria),
-        requiere_vehiculo ? 1 : 0,
-        mensaje_whatsapp || null,
-        destacado ? 1 : 0,
-        activo ? 1 : 0,
+        nombre,
+        descripcion_corta,
+        descripcion_larga,
+        marca_producto,
+        precio_base,
+        mostrar_precio,
+        id_categoria,
+        requiere_vehiculo,
+        mensaje_whatsapp,
+        destacado,
+        activo,
         id,
       ]
     );
-
-    if (resultado.affectedRows === 0) {
-      return res.status(404).json({
-        mensaje: "Producto no encontrado",
-      });
-    }
 
     return res.json({
       mensaje: "Producto actualizado correctamente",
@@ -579,6 +631,75 @@ const marcarImagenPrincipal = async (req, res) => {
     console.error("Error al marcar imagen principal:", error);
     return res.status(500).json({
       mensaje: "Error interno al marcar imagen principal",
+    });
+  }
+};
+
+/* POST /api/productos/:id/imagen_url
+   Establece la imagen principal desde una URL externa, o la elimina si url es "" */
+const setImagenPrincipalUrl = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { url, texto_alt } = req.body || {};
+
+    const nuevaUrl = typeof url === "string" ? url.trim() : "";
+
+    if (nuevaUrl && !/^https?:\/\//i.test(nuevaUrl)) {
+      return res.status(400).json({
+        mensaje: "La URL de imagen debe ser http(s)",
+      });
+    }
+
+    const [producto] = await db.query(
+      "SELECT id_producto FROM productos WHERE id_producto = ? LIMIT 1",
+      [id]
+    );
+
+    if (producto.length === 0) {
+      return res.status(404).json({
+        mensaje: "Producto no encontrado",
+      });
+    }
+
+    const [imagenes] = await db.query(
+      "SELECT id_imagen, url_imagen FROM producto_imagenes WHERE id_producto = ? ORDER BY es_principal DESC, orden ASC, id_imagen ASC",
+      [id]
+    );
+
+    const principalActual = imagenes.find((i) => i.es_principal) || imagenes[0];
+
+    if (nuevaUrl && principalActual && principalActual.url_imagen === nuevaUrl) {
+      return res.json({ mensaje: "La imagen ya estaba configurada" });
+    }
+
+    if (!nuevaUrl && imagenes.length === 0) {
+      return res.json({ mensaje: "El producto no tenía imagen" });
+    }
+
+    for (const img of imagenes) {
+      await db.query("DELETE FROM producto_imagenes WHERE id_imagen = ?", [img.id_imagen]);
+
+      const rutaLocal = path.join(process.cwd(), img.url_imagen);
+      if (fs.existsSync(rutaLocal)) {
+        fs.unlinkSync(rutaLocal);
+      }
+    }
+
+    if (nuevaUrl) {
+      await db.query(
+        `INSERT INTO producto_imagenes (id_producto, url_imagen, texto_alt, orden, es_principal, activo)
+         VALUES (?, ?, ?, 1, 1, 1)`,
+        [id, nuevaUrl, texto_alt || null]
+      );
+    }
+
+    return res.json({
+      mensaje: nuevaUrl ? "Imagen actualizada correctamente" : "Imagen eliminada correctamente",
+    });
+  } catch (error) {
+    console.error("Error al configurar imagen del producto:", error);
+    return res.status(500).json({
+      mensaje: "Error interno al configurar imagen",
     });
   }
 };
@@ -1018,6 +1139,7 @@ module.exports = {
   obtenerImagenesProducto,
   eliminarImagenProducto,
   marcarImagenPrincipal,
+  setImagenPrincipalUrl,
   obtenerProductosPorVehiculo,
   obtenerCompatibilidadesProducto,
   crearCompatibilidad,

@@ -15,6 +15,7 @@ const {
   obtenerImagenesProducto,
   eliminarImagenProducto,
   marcarImagenPrincipal,
+  setImagenPrincipalUrl,
   obtenerProductosPorVehiculo,
   obtenerCompatibilidadesProducto,
   crearCompatibilidad,
@@ -41,6 +42,7 @@ router.put("/:id", requireAuth, requireGerente, actualizarProducto);
 router.delete("/:id", requireAuth, requireGerente, eliminarProducto);
 
 router.post("/:id/imagen", requireAuth, requireGerente, uploadProductos.single("imagen"), subirImagenProducto);
+router.post("/:id/imagen_url", requireAuth, requireGerente, setImagenPrincipalUrl);
 router.put("/:id/imagenes/:idImagen/principal", requireAuth, requireGerente, marcarImagenPrincipal);
 router.delete("/:id/imagenes/:idImagen", requireAuth, requireGerente, eliminarImagenProducto);
 
