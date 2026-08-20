@@ -976,6 +976,7 @@ const actualizarCompatibilidad = async (req, res) => {
 
 /* POST /api/productos/:id/stock — Agregar stock a una sucursal */
 const agregarStock = async (req, res) => {
+  const connection = await db.getConnection();
   try {
     const { id } = req.params;
     const { id_sucursal, cantidad, notas } = req.body;
@@ -987,51 +988,57 @@ const agregarStock = async (req, res) => {
       });
     }
 
+    await connection.beginTransaction();
+
     /* Verificar que el producto exista */
-    const [prod] = await db.query(
+    const [prod] = await connection.query(
       "SELECT id_producto, nombre FROM productos WHERE id_producto = ? LIMIT 1",
       [id]
     );
     if (prod.length === 0) {
+      await connection.rollback();
       return res.status(404).json({ ok: false, mensaje: "Producto no encontrado" });
     }
 
     /* Verificar que la sucursal exista */
-    const [suc] = await db.query(
+    const [suc] = await connection.query(
       "SELECT id_sucursal, nombre FROM sucursales WHERE id_sucursal = ? LIMIT 1",
       [id_sucursal]
     );
     if (suc.length === 0) {
+      await connection.rollback();
       return res.status(404).json({ ok: false, mensaje: "Sucursal no encontrada" });
     }
 
+    const cantidadNum = Number(cantidad);
+
     /* Verificar si ya existe inventario para ese producto en esa sucursal */
-    const [existe] = await db.query(
-      "SELECT id_inventario, stock FROM inventario_sucursal WHERE id_producto = ? AND id_sucursal = ? LIMIT 1",
+    const [existe] = await connection.query(
+      "SELECT id_inventario, stock FROM inventario_sucursal WHERE id_producto = ? AND id_sucursal = ? LIMIT 1 FOR UPDATE",
       [id, id_sucursal]
     );
 
-    const cantidadNum = Number(cantidad);
-
     if (existe.length > 0) {
-      /* Actualizar stock existente */
-      await db.query(
+      /* Actualizar stock existente con bloqueo */
+      await connection.query(
         "UPDATE inventario_sucursal SET stock = stock + ? WHERE id_inventario = ?",
         [cantidadNum, existe[0].id_inventario]
       );
     } else {
       /* Crear registro nuevo */
-      await db.query(
+      await connection.query(
         "INSERT INTO inventario_sucursal (id_producto, id_sucursal, stock, stock_minimo) VALUES (?, ?, ?, 0)",
         [id, id_sucursal, cantidadNum]
       );
     }
 
     /* Consultar stock actualizado */
-    const [stockActual] = await db.query(
+    const [stockActual] = await connection.query(
       "SELECT stock FROM inventario_sucursal WHERE id_producto = ? AND id_sucursal = ?",
       [id, id_sucursal]
     );
+
+    await connection.commit();
 
     return res.status(200).json({
       ok: true,
@@ -1039,11 +1046,97 @@ const agregarStock = async (req, res) => {
       stock_actual: stockActual[0]?.stock || 0,
     });
   } catch (error) {
+    await connection.rollback();
     console.error("Error al agregar stock:", error);
     return res.status(500).json({
       ok: false,
       mensaje: "Error interno al agregar stock",
     });
+  } finally {
+    connection.release();
+  }
+};
+
+/* POST /api/productos/:id/stock/reducir — Reducir stock de una sucursal */
+const reducirStock = async (req, res) => {
+  const connection = await db.getConnection();
+  try {
+    const { id } = req.params;
+    const { id_sucursal, cantidad, notas } = req.body;
+
+    if (!id_sucursal || !cantidad || Number(cantidad) <= 0) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "Sucursal y cantidad (mayor a 0) son obligatorios",
+      });
+    }
+
+    await connection.beginTransaction();
+
+    const [prod] = await connection.query(
+      "SELECT id_producto FROM productos WHERE id_producto = ? LIMIT 1",
+      [id]
+    );
+    if (prod.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ ok: false, mensaje: "Producto no encontrado" });
+    }
+
+    const [suc] = await connection.query(
+      "SELECT id_sucursal, nombre FROM sucursales WHERE id_sucursal = ? LIMIT 1",
+      [id_sucursal]
+    );
+    if (suc.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ ok: false, mensaje: "Sucursal no encontrada" });
+    }
+
+    const cantidadNum = Number(cantidad);
+
+    const [existe] = await connection.query(
+      "SELECT id_inventario, stock FROM inventario_sucursal WHERE id_producto = ? AND id_sucursal = ? LIMIT 1 FOR UPDATE",
+      [id, id_sucursal]
+    );
+
+    if (existe.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ ok: false, mensaje: "No hay inventario registrado para este producto en esta sucursal" });
+    }
+
+    if (existe[0].stock < cantidadNum) {
+      await connection.rollback();
+      return res.status(400).json({
+        ok: false,
+        mensaje: `Stock insuficiente. Disponible: ${existe[0].stock}, solicitado: ${cantidadNum}`,
+      });
+    }
+
+    await connection.query(
+      "UPDATE inventario_sucursal SET stock = stock - ? WHERE id_inventario = ?",
+      [cantidadNum, existe[0].id_inventario]
+    );
+
+    const [stockActual] = await connection.query(
+      "SELECT stock FROM inventario_sucursal WHERE id_producto = ? AND id_sucursal = ?",
+      [id, id_sucursal]
+    );
+
+    await connection.commit();
+
+    return res.status(200).json({
+      ok: true,
+      mensaje: `Stock reducido: -${cantidadNum} unidades en ${suc[0].nombre}`,
+      stock_actual: stockActual[0]?.stock || 0,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error al reducir stock:", error);
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error interno al reducir stock",
+    });
+  } finally {
+    connection.release();
   }
 };
 
@@ -1147,5 +1240,6 @@ module.exports = {
   eliminarCompatibilidad,
   obtenerStockProducto,
   agregarStock,
+  reducirStock,
   buscarProductosInteligente,
 };

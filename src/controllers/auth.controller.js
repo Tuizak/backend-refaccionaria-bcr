@@ -1,4 +1,27 @@
 const pool = require("../config/db");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+
+const JWT_SECRET = process.env.JWT_SECRET || "fallback_secret_change_me";
+const JWT_EXPIRES = process.env.JWT_EXPIRES_IN || "24h";
+
+/* ─── Helpers ────────────────────────────────────────────── */
+
+function firmarToken(usuario) {
+  return jwt.sign(
+    {
+      id: usuario.id_usuario,
+      nombre: usuario.nombre,
+      email: usuario.email,
+      rol: usuario.rol,
+      id_sucursal: usuario.id_sucursal,
+    },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES }
+  );
+}
+
+/* ─── LOGIN ──────────────────────────────────────────────── */
 
 const login = async (req, res) => {
   try {
@@ -11,14 +34,12 @@ const login = async (req, res) => {
       });
     }
 
+    /* Buscamos TODOS los usuarios activos (incluyendo pin hasheado) */
     const [rows] = await pool.query(
-      `
-      SELECT id_usuario, nombre, email, rol, id_sucursal, activo
-      FROM usuarios
-      WHERE pin = ? AND activo = 1
-      LIMIT 1
-      `,
-      [String(pin)]
+      `SELECT id_usuario, nombre, email, pin, rol, id_sucursal, activo
+       FROM usuarios
+       WHERE activo = 1
+       ORDER BY id_usuario ASC`
     );
 
     if (rows.length === 0) {
@@ -28,21 +49,52 @@ const login = async (req, res) => {
       });
     }
 
-    const usuario = rows[0];
+    /* Comparamos el PIN contra cada hash */
+    let usuarioEncontrado = null;
+    for (const u of rows) {
+      const coincide = await bcrypt.compare(String(pin), u.pin);
+      if (coincide) {
+        usuarioEncontrado = u;
+        break;
+      }
+    }
+
+    /* Si ningún hash coincidió, probamos texto plano (migración) */
+    if (!usuarioEncontrado) {
+      for (const u of rows) {
+        if (u.pin === String(pin)) {
+          usuarioEncontrado = u;
+          /* Migramos el PIN a hash en background */
+          const hash = await bcrypt.hash(String(pin), 10);
+          pool.query("UPDATE usuarios SET pin = ? WHERE id_usuario = ?", [hash, u.id_usuario]);
+          break;
+        }
+      }
+    }
+
+    if (!usuarioEncontrado) {
+      return res.status(401).json({
+        ok: false,
+        message: "PIN incorrecto o usuario inactivo",
+      });
+    }
 
     await pool.query(
       `UPDATE usuarios SET ultimo_acceso = NOW() WHERE id_usuario = ?`,
-      [usuario.id_usuario]
+      [usuarioEncontrado.id_usuario]
     );
+
+    const token = firmarToken(usuarioEncontrado);
 
     return res.status(200).json({
       ok: true,
       data: {
-        id_usuario: usuario.id_usuario,
-        nombre: usuario.nombre,
-        email: usuario.email,
-        rol: usuario.rol,
-        id_sucursal: usuario.id_sucursal,
+        token,
+        id_usuario: usuarioEncontrado.id_usuario,
+        nombre: usuarioEncontrado.nombre,
+        email: usuarioEncontrado.email,
+        rol: usuarioEncontrado.rol,
+        id_sucursal: usuarioEncontrado.id_sucursal,
       },
     });
   } catch (error) {
@@ -54,39 +106,20 @@ const login = async (req, res) => {
   }
 };
 
+/* ─── VERIFICAR SESIÓN (por JWT) ─────────────────────────── */
+
 const verificarSesion = async (req, res) => {
   try {
-    const { id_usuario } = req.body;
-
-    if (!id_usuario) {
-      return res.status(400).json({
-        ok: false,
-        message: "ID de usuario requerido",
-      });
-    }
-
-    const [rows] = await pool.query(
-      `
-      SELECT id_usuario, nombre, email, rol, id_sucursal
-      FROM usuarios
-      WHERE id_usuario = ? AND activo = 1
-      LIMIT 1
-      `,
-      [id_usuario]
-    );
-
-    if (rows.length === 0) {
-      return res.status(401).json({ ok: false, message: "Sesión inválida" });
-    }
-
-    return res.status(200).json({ ok: true, data: rows[0] });
+    /* req.user ya viene del middleware requireAuth (decodificado del JWT) */
+    return res.status(200).json({ ok: true, data: req.user });
   } catch (error) {
     console.error("Error en verificarSesion:", error);
     return res.status(500).json({ ok: false, message: "Error interno" });
   }
 };
 
-/* GET /api/auth/usuarios — Listar todos los usuarios (gerente only) */
+/* ─── LISTAR USUARIOS ────────────────────────────────────── */
+
 const listarUsuarios = async (req, res) => {
   try {
     const [rows] = await pool.query(
@@ -101,7 +134,8 @@ const listarUsuarios = async (req, res) => {
   }
 };
 
-/* POST /api/auth/usuarios — Crear usuario (gerente only) */
+/* ─── CREAR USUARIO ──────────────────────────────────────── */
+
 const crearUsuario = async (req, res) => {
   try {
     const { nombre, email, pin, rol, id_sucursal } = req.body;
@@ -119,13 +153,15 @@ const crearUsuario = async (req, res) => {
       return res.status(400).json({ ok: false, message: "Rol no válido" });
     }
 
+    const hash = await bcrypt.hash(String(pin), 10);
+
     const [resultado] = await pool.query(
       `INSERT INTO usuarios (nombre, email, pin, rol, id_sucursal, activo)
        VALUES (?, ?, ?, ?, ?, 1)`,
       [
         nombre.trim(),
         email?.trim() || null,
-        String(pin),
+        hash,
         rol || "empleado",
         id_sucursal || null,
       ]
@@ -145,7 +181,8 @@ const crearUsuario = async (req, res) => {
   }
 };
 
-/* PATCH /api/auth/usuarios/:id/toggle — Activar/desactivar usuario (gerente only) */
+/* ─── TOGGLE USUARIO ─────────────────────────────────────── */
+
 const toggleUsuario = async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -174,7 +211,8 @@ const toggleUsuario = async (req, res) => {
   }
 };
 
-/* PUT /api/auth/usuarios/:id — Actualizar datos de usuario (gerente only) */
+/* ─── ACTUALIZAR USUARIO ─────────────────────────────────── */
+
 const actualizarUsuario = async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -198,7 +236,8 @@ const actualizarUsuario = async (req, res) => {
       if (!/^\d{4,6}$/.test(String(pin))) {
         return res.status(400).json({ ok: false, message: "El PIN debe ser numérico de 4 a 6 dígitos" });
       }
-      updates.push("pin = ?"); params.push(String(pin));
+      const hash = await bcrypt.hash(String(pin), 10);
+      updates.push("pin = ?"); params.push(hash);
     }
     if (rol) { updates.push("rol = ?"); params.push(rol); }
     if (id_sucursal !== undefined) { updates.push("id_sucursal = ?"); params.push(id_sucursal || null); }

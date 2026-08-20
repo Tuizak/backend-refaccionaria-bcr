@@ -1,5 +1,7 @@
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const path = require("path");
 require("dotenv").config();
 
@@ -8,11 +10,19 @@ const vehiculosRoutes = require("./routes/vehiculos.routes");
 const promocionesRoutes = require("./routes/promociones.routes");
 const productosRoutes = require("./routes/productos.routes");
 const authRoutes = require("./routes/auth.routes");
+const sucursalesRoutes = require("./routes/sucursales.routes");
 
 const app = express();
 
+/* ─── HELMET (headers de seguridad) ──────────────────────── */
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+}));
+
+/* ─── CORS restrictivo ──────────────────────────────────── */
 const allowedOrigins = [
   process.env.FRONTEND_URL,
+  "https://lightpink-squirrel-140641.hostingersite.com",
   "http://localhost:5173",
   "http://localhost:5174",
   "http://localhost:5175",
@@ -23,15 +33,38 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Permitir requests sin origin (curl, Postman, apps móviles)
       if (!origin) return callback(null, true);
       if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
-      return callback(null, true); // Temporalmente permitir todo para desarrollo
+      return callback(null, false);
     },
     credentials: true,
   })
 );
 
+/* ─── RATE LIMITING ──────────────────────────────────────── */
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 10, // máximo 10 intentos por ventana
+  message: {
+    ok: false,
+    message: "Demasiados intentos de inicio de sesión. Intenta de nuevo en 15 minutos.",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minuto
+  max: 100, // máximo 100 requests por minuto
+  message: {
+    ok: false,
+    message: "Demasiadas solicitudes. Intenta de nuevo en un minuto.",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/* ─── BODY PARSERS ───────────────────────────────────────── */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -48,19 +81,17 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-/* ─── AUTH (login sin auth middleware) ──────────────────── */
+/* ─── AUTH (login con rate limiting) ─────────────────────── */
+app.use("/api/auth/login", loginLimiter);
 app.use("/api/auth", authRoutes);
 
-/* ─── RUTAS PÚBLICAS (lectura — la web las necesita) ────── */
-app.use("/api/vehiculos", vehiculosRoutes);
-app.use("/api/promociones", promocionesRoutes);
-app.use("/api/productos", productosRoutes);
+/* ─── RUTAS PÚBLICAS (lectura + rate limiting) ───────────── */
+app.use("/api/vehiculos", apiLimiter, vehiculosRoutes);
+app.use("/api/promociones", apiLimiter, promocionesRoutes);
+app.use("/api/productos", apiLimiter, productosRoutes);
+app.use("/api/sucursales", apiLimiter, sucursalesRoutes);
 
-/* ─── NOTA: La protección de escritura (POST/PUT/DELETE)
-   se aplica DENTRO de cada archivo de rutas con requireGerente.
-   Las rutas GET son públicas para que la web funcione sin login.
-*/
-
+/* ─── 404 ───────────────────────────────────────────────── */
 app.use((req, res) => {
   return res.status(404).json({
     ok: false,
