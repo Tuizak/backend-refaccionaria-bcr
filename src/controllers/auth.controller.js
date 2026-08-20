@@ -122,6 +122,19 @@ const verificarSesion = async (req, res) => {
 
 const listarUsuarios = async (req, res) => {
   try {
+    /* Gerentes solo ven usuarios de su propia sucursal */
+    if (req.user.rol === "gerente" && req.user.id_sucursal) {
+      const [rows] = await pool.query(
+        `SELECT id_usuario, nombre, email, rol, id_sucursal, activo, ultimo_acceso
+         FROM usuarios
+         WHERE id_sucursal = ?
+         ORDER BY id_usuario ASC`,
+        [req.user.id_sucursal]
+      );
+      return res.status(200).json({ ok: true, data: rows });
+    }
+
+    /* Superadmin ve todos */
     const [rows] = await pool.query(
       `SELECT id_usuario, nombre, email, rol, id_sucursal, activo, ultimo_acceso
        FROM usuarios
@@ -153,6 +166,18 @@ const crearUsuario = async (req, res) => {
       return res.status(400).json({ ok: false, message: "Rol no válido" });
     }
 
+    /* Gerente solo puede crear usuarios en su propia sucursal */
+    const sucursalFinal = id_sucursal || req.user.id_sucursal;
+    if (req.user.rol === "gerente" && req.user.id_sucursal) {
+      if (Number(sucursalFinal) !== Number(req.user.id_sucursal)) {
+        return res.status(403).json({ ok: false, message: "No puedes crear usuarios en otra sucursal" });
+      }
+      /* Gerente no puede crear superadmin ni gerente de otra sucursal */
+      if (rol === "superadmin") {
+        return res.status(403).json({ ok: false, message: "No puedes crear superadmin" });
+      }
+    }
+
     const hash = await bcrypt.hash(String(pin), 10);
 
     const [resultado] = await pool.query(
@@ -163,7 +188,7 @@ const crearUsuario = async (req, res) => {
         email?.trim() || null,
         hash,
         rol || "empleado",
-        id_sucursal || null,
+        sucursalFinal || null,
       ]
     );
 

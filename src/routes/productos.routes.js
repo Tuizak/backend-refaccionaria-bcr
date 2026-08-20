@@ -25,9 +25,11 @@ const {
   agregarStock,
   reducirStock,
   buscarProductosInteligente,
+  obtenerDashboard,
 } = require("../controllers/productos.controller");
 
 /* ─── RUTAS ESPECÍFICAS PRIMERO (antes de /:id) ────────── */
+router.get("/dashboard", requireAuth, obtenerDashboard);
 router.get("/", obtenerProductos);
 router.get("/buscar", buscarProductosInteligente);
 router.get("/catalogos/categorias", obtenerCategoriasParaProductos);

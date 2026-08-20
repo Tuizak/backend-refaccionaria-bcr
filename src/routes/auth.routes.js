@@ -1,5 +1,5 @@
 const express = require("express");
-const { requireAuth, requireGerente } = require("../middlewares/auth");
+const { requireAuth, requireGerente, requireSuperAdmin } = require("../middlewares/auth");
 const {
   login,
   verificarSesion,
@@ -17,7 +17,7 @@ router.post("/login", login);
 /* ─── VERIFICAR SESIÓN (requiere auth) ──────────────────── */
 router.post("/verificar", requireAuth, verificarSesion);
 
-/* ─── GESTIÓN DE USUARIOS (solo gerente) ────────────────── */
+/* ─── GESTIÓN DE USUARIOS (gerente: solo su sucursal, superadmin: todos) ── */
 router.get("/usuarios", requireAuth, requireGerente, listarUsuarios);
 router.post("/usuarios", requireAuth, requireGerente, crearUsuario);
 router.put("/usuarios/:id", requireAuth, requireGerente, actualizarUsuario);

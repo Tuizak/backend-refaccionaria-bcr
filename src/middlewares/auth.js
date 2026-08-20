@@ -85,7 +85,61 @@ const requireGerente = (req, res, next) => {
 };
 
 /**
- * requireEmpleado — permite tanto gerente como empleado.
+ * requireSuperAdmin — solo superadmin pasa.
+ */
+const requireSuperAdmin = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ ok: false, message: "Acceso no autorizado" });
+  }
+
+  if (req.user.rol !== "superadmin") {
+    return res.status(403).json({
+      ok: false,
+      message: "Se requieren permisos de super administrador",
+    });
+  }
+
+  next();
+};
+
+/**
+ * requireSucursalAccess — verifica que el usuario pueda operar sobre la sucursal indicada.
+ * - superadmin: puede todo
+ * - gerente: solo su propia id_sucursal
+ * - empleado: solo lectura (este middleware es para escritura)
+ *
+ * Lee id_sucursal de req.body.id_sucursal o req.params.idSucursal o req.query.sucursal.
+ */
+const requireSucursalAccess = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ ok: false, message: "Acceso no autorizado" });
+  }
+
+  if (req.user.rol === "superadmin") return next();
+
+  const sucursalObjetivo = Number(
+    req.body.id_sucursal || req.params.idSucursal || req.query.sucursal || 0
+  );
+
+  if (!sucursalObjetivo) {
+    return res.status(400).json({
+      ok: false,
+      message: "Se requiere id_sucursal para esta operación",
+    });
+  }
+
+  if (Number(req.user.id_sucursal) !== sucursalObjetivo) {
+    return res.status(403).json({
+      ok: false,
+      message: "No puedes realizar operaciones en otra sucursal",
+    });
+  }
+
+  next();
+};
+
+/**
+ * requireEmpleado — permite gerente, superadmin y empleado.
  */
 const requireEmpleado = (req, res, next) => {
   if (!req.user) {
@@ -105,4 +159,10 @@ const requireEmpleado = (req, res, next) => {
   next();
 };
 
-module.exports = { requireAuth, requireGerente, requireEmpleado };
+module.exports = {
+  requireAuth,
+  requireGerente,
+  requireSuperAdmin,
+  requireSucursalAccess,
+  requireEmpleado,
+};

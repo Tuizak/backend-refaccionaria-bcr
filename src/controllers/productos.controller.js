@@ -1005,6 +1005,16 @@ const agregarStock = async (req, res) => {
       });
     }
 
+    /* Verificación de sucursal: gerente solo puede operar su propia sucursal */
+    if (req.user && req.user.rol !== "superadmin") {
+      if (Number(req.user.id_sucursal) !== Number(id_sucursal)) {
+        return res.status(403).json({
+          ok: false,
+          mensaje: "No puedes agregar stock a otra sucursal",
+        });
+      }
+    }
+
     await connection.beginTransaction();
 
     /* Verificar que el producto exista */
@@ -1086,6 +1096,16 @@ const reducirStock = async (req, res) => {
         ok: false,
         mensaje: "Sucursal y cantidad (mayor a 0) son obligatorios",
       });
+    }
+
+    /* Verificación de sucursal: gerente solo puede operar su propia sucursal */
+    if (req.user && req.user.rol !== "superadmin") {
+      if (Number(req.user.id_sucursal) !== Number(id_sucursal)) {
+        return res.status(403).json({
+          ok: false,
+          mensaje: "No puedes reducir stock de otra sucursal",
+        });
+      }
     }
 
     await connection.beginTransaction();
@@ -1254,6 +1274,119 @@ const buscarProductosInteligente = async (req, res) => {
   }
 };
 
+/* GET /api/dashboard — Resumen según rol */
+const obtenerDashboard = async (req, res) => {
+  try {
+    const { rol, id_sucursal } = req.user;
+
+    if (rol === "superadmin") {
+      /* Dashboard global: métricas de todas las sucursales */
+      const [sucursales] = await db.query(`
+        SELECT
+          s.id_sucursal,
+          s.nombre,
+          COALESCE(SUM(inv.stock), 0) AS stock_total,
+          COUNT(CASE WHEN inv.stock > 0 THEN 1 END) AS productos_con_stock,
+          COUNT(CASE WHEN inv.stock = 0 THEN 1 END) AS productos_agotados
+        FROM sucursales s
+        LEFT JOIN inventario_sucursal inv ON inv.id_sucursal = s.id_sucursal
+        WHERE s.activo = 1
+        GROUP BY s.id_sucursal, s.nombre
+        ORDER BY s.nombre ASC
+      `);
+
+      const [totales] = await db.query(`
+        SELECT
+          COUNT(DISTINCT p.id_producto) AS total_productos,
+          COALESCE(SUM(inv.stock), 0) AS stock_total_global,
+          COUNT(CASE WHEN inv.stock = 0 THEN 1 END) AS productos_agotados
+        FROM productos p
+        LEFT JOIN inventario_sucursal inv ON inv.id_producto = p.id_producto
+        WHERE p.activo = 1
+      `);
+
+      const [usuariosCount] = await db.query(
+        `SELECT COUNT(*) AS total FROM usuarios WHERE activo = 1`
+      );
+
+      return res.json({
+        ok: true,
+        data: {
+          tipo: "global",
+          total_sucursales: sucursales.length,
+          total_productos: totales[0]?.total_productos || 0,
+          stock_total_global: totales[0]?.stock_total_global || 0,
+          total_usuarios: usuariosCount[0]?.total || 0,
+          sucursales,
+        },
+      });
+    }
+
+    /* Dashboard de gerente/empleado: solo su sucursal */
+    if (!id_sucursal) {
+      return res.json({
+        ok: true,
+        data: { tipo: "sin_sucursal", mensaje: "No tienes sucursal asignada" },
+      });
+    }
+
+    const [sucursalInfo] = await db.query(
+      "SELECT id_sucursal, nombre, direccion FROM sucursales WHERE id_sucursal = ?",
+      [id_sucursal]
+    );
+
+    const [stockSucursal] = await db.query(`
+      SELECT
+        p.id_producto,
+        p.sku,
+        p.nombre,
+        p.marca_producto,
+        c.nombre AS categoria,
+        inv.stock,
+        inv.stock_minimo,
+        (
+          SELECT pi.url_imagen
+          FROM producto_imagenes pi
+          WHERE pi.id_producto = p.id_producto AND pi.activo = 1
+          ORDER BY pi.es_principal DESC, pi.orden ASC
+          LIMIT 1
+        ) AS imagen_principal
+      FROM inventario_sucursal inv
+      INNER JOIN productos p ON p.id_producto = inv.id_producto
+      INNER JOIN categorias c ON c.id_categoria = p.id_categoria
+      WHERE inv.id_sucursal = ? AND p.activo = 1
+      ORDER BY inv.stock ASC, p.nombre ASC
+    `, [id_sucursal]);
+
+    const [usuariosSucursal] = await db.query(
+      "SELECT COUNT(*) AS total FROM usuarios WHERE id_sucursal = ? AND activo = 1",
+      [id_sucursal]
+    );
+
+    const stockTotal = stockSucursal.reduce((sum, p) => sum + Number(p.stock), 0);
+    const stockBajo = stockSucursal.filter(p => Number(p.stock) > 0 && Number(p.stock) <= Number(p.stock_minimo || 5)).length;
+    const agotados = stockSucursal.filter(p => Number(p.stock) === 0).length;
+
+    return res.json({
+      ok: true,
+      data: {
+        tipo: "sucursal",
+        mi_sucursal: sucursalInfo[0] || null,
+        productos_con_stock: stockSucursal.filter(p => Number(p.stock) > 0).length,
+        stock_total: stockTotal,
+        stock_bajo: stockBajo,
+        productos_agotados: agotados,
+        total_productos: stockSucursal.length,
+        empleados: usuariosSucursal[0]?.total || 0,
+        productos: stockSucursal,
+      },
+    });
+  } catch (error) {
+    console.error("Error en obtenerDashboard:", error);
+    return res.status(500).json({ ok: false, mensaje: "Error al obtener dashboard" });
+  }
+};
+
 module.exports = {
   obtenerProductos,
   obtenerProductoPorId,
@@ -1275,4 +1408,5 @@ module.exports = {
   agregarStock,
   reducirStock,
   buscarProductosInteligente,
+  obtenerDashboard,
 };
