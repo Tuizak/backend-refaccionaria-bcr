@@ -1,15 +1,41 @@
 const pool = require("../config/db");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 const JWT_SECRET = process.env.JWT_SECRET || "fallback_secret_change_me";
+
+/* ═══════════════════════════════════════════════════════════
+   SEGURIDAD: Detección de patrones sospechosos
+   ═══════════════════════════════════════════════════════════ */
+const suspiciousIps = new Map();
+
+function flagSuspicious(ip, reason) {
+  const record = suspiciousIps.get(ip) || { count: 0, reasons: [] };
+  record.count++;
+  record.reasons.push({ reason, time: Date.now() });
+  record.lastSeen = Date.now();
+  suspiciousIps.set(ip, record);
+
+  if (record.count >= 10) {
+    console.warn(`[SECURITY] IP ${ip} marcada como SOSPECHOSA (${record.count} incidentes): ${reason}`);
+  }
+}
+
+function getClientIp(req) {
+  return req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
+    || req.headers["x-real-ip"]
+    || req.socket?.remoteAddress
+    || "unknown";
+}
 
 /**
  * requireAuth — valida el JWT del header Authorization.
  * Si es válido, decodifica el token y adjunta req.user.
- * También verifica en BD que el usuario siga activo.
+ * Verifica: token válido, usuario activo, IP fingerprint.
  */
 const requireAuth = async (req, res, next) => {
   const authHeader = req.headers.authorization;
+  const ip = getClientIp(req);
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({
@@ -20,8 +46,22 @@ const requireAuth = async (req, res, next) => {
 
   const token = authHeader.split(" ")[1];
 
+  // Validar formato del token (anti-inyección)
+  if (!token || typeof token !== "string" || token.length > 2048 || /[<>"'`;\\]/.test(token)) {
+    flagSuspicious(ip, "Token con formato sospechoso");
+    return res.status(401).json({ ok: false, message: "Token inválido." });
+  }
+
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+
+    // Verificar IP fingerprint del token
+    const ipHash = crypto.createHash("sha256").update(ip).digest("hex").slice(0, 8);
+    if (decoded.ip && decoded.ip !== ipHash) {
+      flagSuspicious(ip, `IP mismatch: token hash=${decoded.ip}, actual=${ipHash}`);
+      // No bloquear pero registrar — la IP puede cambiar en移动
+      // En producción strict: return res.status(401)...
+    }
 
     /* Verificamos que el usuario siga activo en BD */
     const [rows] = await pool.query(
@@ -49,6 +89,7 @@ const requireAuth = async (req, res, next) => {
       });
     }
     if (error.name === "JsonWebTokenError") {
+      flagSuspicious(ip, "JWT inválido");
       return res.status(401).json({
         ok: false,
         message: "Token inválido.",

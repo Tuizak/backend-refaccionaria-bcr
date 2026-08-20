@@ -1,13 +1,87 @@
 const pool = require("../config/db");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 const JWT_SECRET = process.env.JWT_SECRET || "fallback_secret_change_me";
 const JWT_EXPIRES = process.env.JWT_EXPIRES_IN || "24h";
 
+/* ═══════════════════════════════════════════════════════════
+   SEGURIDAD: Anti-brute-force en memoria
+   - Bloqueo de cuenta tras 5 intentos fallidos (15 min)
+   - Delay progresivo para evitar timing attacks
+   - Log de intentos sospechosos
+   ═══════════════════════════════════════════════════════════ */
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_TIME_MS = 15 * 60 * 1000; // 15 minutos
+const PROGRESSIVE_DELAYS = [0, 200, 500, 1000, 2000]; // ms
+
+// Map<ip, { attempts: number, lockedUntil: number, lastAttempt: number }>
+const loginAttempts = new Map();
+
+function getClienteIp(req) {
+  return req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
+    || req.headers["x-real-ip"]
+    || req.socket?.remoteAddress
+    || "unknown";
+}
+
+function checkBruteForce(ip) {
+  const record = loginAttempts.get(ip);
+  if (!record) return { blocked: false, attempts: 0 };
+
+  // Si está bloqueado y el tiempo no ha expirado
+  if (record.lockedUntil && Date.now() < record.lockedUntil) {
+    const remaining = Math.ceil((record.lockedUntil - Date.now()) / 1000);
+    return { blocked: true, attempts: record.attempts, remaining };
+  }
+
+  // Si el lockout expiró, resetear
+  if (record.lockedUntil && Date.now() >= record.lockedUntil) {
+    loginAttempts.delete(ip);
+    return { blocked: false, attempts: 0 };
+  }
+
+  return { blocked: false, attempts: record.attempts };
+}
+
+function recordFailedAttempt(ip) {
+  const record = loginAttempts.get(ip) || { attempts: 0, lockedUntil: 0, lastAttempt: 0 };
+  record.attempts++;
+  record.lastAttempt = Date.now();
+
+  if (record.attempts >= MAX_FAILED_ATTEMPTS) {
+    record.lockedUntil = Date.now() + LOCKOUT_TIME_MS;
+    console.warn(`[SECURITY] IP ${ip} bloqueada por ${MAX_FAILED_ATTEMPTS} intentos fallidos. Lockout: 15 min`);
+  }
+
+  loginAttempts.set(ip, record);
+}
+
+function recordSuccess(ip) {
+  loginAttempts.delete(ip);
+}
+
+function getProgressiveDelay(attempts) {
+  const idx = Math.min(attempts, PROGRESSIVE_DELAYS.length - 1);
+  return PROGRESSIVE_DELAYS[idx];
+}
+
+// Limpieza periódica de registros viejos (cada 30 min)
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of loginAttempts.entries()) {
+    if (record.lockedUntil && now > record.lockedUntil) {
+      loginAttempts.delete(ip);
+    } else if (!record.lockedUntil && now - record.lastAttempt > LOCKOUT_TIME_MS) {
+      loginAttempts.delete(ip);
+    }
+  }
+}, 30 * 60 * 1000);
+
 /* ─── Helpers ────────────────────────────────────────────── */
 
-function firmarToken(usuario) {
+function firmarToken(usuario, ip) {
   return jwt.sign(
     {
       id: usuario.id_usuario,
@@ -15,26 +89,59 @@ function firmarToken(usuario) {
       email: usuario.email,
       rol: usuario.rol,
       id_sucursal: usuario.id_sucursal,
+      ip: crypto.createHash("sha256").update(ip || "").digest("hex").slice(0, 8),
     },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES }
   );
 }
 
-/* ─── LOGIN ──────────────────────────────────────────────── */
+/* Sanitización de entrada: solo permite caracteres seguros */
+function sanitizeInput(str) {
+  if (typeof str !== "string") return "";
+  return str.replace(/[<>"'`;\\]/g, "").trim().slice(0, 20);
+}
 
+/* ═══════════════════════════════════════════════════════════
+   LOGIN CON PROTECCIÓN ANTI-BRUTE-FORCE
+   ═══════════════════════════════════════════════════════════ */
 const login = async (req, res) => {
+  const ip = getClienteIp(req);
+  const inicio = Date.now();
+
   try {
     const { pin } = req.body;
 
-    if (!pin || !/^\d{4,6}$/.test(String(pin))) {
+    // 1. Validación de formato (anti-inyección: solo dígitos)
+    if (!pin || !/^\d{4,6}$/.test(String(pin).trim())) {
+      // Delay aleatorio para no revelar si el formato es válido
+      await new Promise(r => setTimeout(r, 100 + Math.random() * 200));
       return res.status(400).json({
         ok: false,
         message: "PIN inválido. Debe ser numérico de 4 a 6 dígitos.",
       });
     }
 
-    /* Buscamos TODOS los usuarios activos (incluyendo pin hasheado) */
+    const pinLimpio = String(pin).trim();
+
+    // 2. Verificar brute-force por IP
+    const bruteCheck = checkBruteForce(ip);
+    if (bruteCheck.blocked) {
+      console.warn(`[SECURITY] Login bloqueado desde IP ${ip} — ${bruteCheck.attempts} intentos fallidos. Restan ${bruteCheck.remaining}s`);
+      return res.status(429).json({
+        ok: false,
+        message: `Demasiados intentos fallidos. Intenta de nuevo en ${bruteCheck.remaining} segundos.`,
+        retryAfter: bruteCheck.remaining,
+      });
+    }
+
+    // 3. Delay progresivo anti-timing
+    const delay = getProgressiveDelay(bruteCheck.attempts);
+    if (delay > 0) {
+      await new Promise(r => setTimeout(r, delay));
+    }
+
+    // 4. Buscar usuarios activos
     const [rows] = await pool.query(
       `SELECT id_usuario, nombre, email, pin, rol, id_sucursal, activo
        FROM usuarios
@@ -43,48 +150,65 @@ const login = async (req, res) => {
     );
 
     if (rows.length === 0) {
-      return res.status(401).json({
-        ok: false,
-        message: "PIN incorrecto o usuario inactivo",
-      });
+      recordFailedAttempt(ip);
+      return res.status(401).json({ ok: false, message: "PIN incorrecto" });
     }
 
-    /* Comparamos el PIN contra cada hash */
+    // 5. Comparar PIN con bcrypt ( timing-safe )
     let usuarioEncontrado = null;
     for (const u of rows) {
-      const coincide = await bcrypt.compare(String(pin), u.pin);
+      const coincide = await bcrypt.compare(pinLimpio, u.pin);
       if (coincide) {
         usuarioEncontrado = u;
         break;
       }
     }
 
-    /* Si ningún hash coincidió, probamos texto plano (migración) */
+    // 6. Migración de texto plano (legacy)
     if (!usuarioEncontrado) {
       for (const u of rows) {
-        if (u.pin === String(pin)) {
+        if (u.pin === pinLimpio) {
           usuarioEncontrado = u;
-          /* Migramos el PIN a hash en background */
-          const hash = await bcrypt.hash(String(pin), 10);
+          const hash = await bcrypt.hash(pinLimpio, 10);
           pool.query("UPDATE usuarios SET pin = ? WHERE id_usuario = ?", [hash, u.id_usuario]);
           break;
         }
       }
     }
 
+    // 7. PIN incorrecto
     if (!usuarioEncontrado) {
+      recordFailedAttempt(ip);
+      const intentos = loginAttempts.get(ip)?.attempts || 0;
+      const restantes = MAX_FAILED_ATTEMPTS - intentos;
+      console.warn(`[SECURITY] PIN incorrecto desde IP ${ip}. Intentos: ${intentos}/${MAX_FAILED_ATTEMPTS}`);
+
+      // Delay extra si está cerca del bloqueo
+      if (restantes <= 2 && restantes > 0) {
+        await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+      }
+
       return res.status(401).json({
         ok: false,
-        message: "PIN incorrecto o usuario inactivo",
+        message: "PIN incorrecto",
+        ...(restantes > 0 && restantes <= 3 && { intentosRestantes: restantes }),
       });
     }
 
+    // 8. Login exitoso — limpiar intentos
+    recordSuccess(ip);
+
+    // 9. Actualizar último acceso
     await pool.query(
       `UPDATE usuarios SET ultimo_acceso = NOW() WHERE id_usuario = ?`,
       [usuarioEncontrado.id_usuario]
     );
 
-    const token = firmarToken(usuarioEncontrado);
+    // 10. Firmar token con fingerprint de IP
+    const token = firmarToken(usuarioEncontrado, ip);
+
+    const duracion = Date.now() - inicio;
+    console.log(`[AUTH] Login exitoso: ${usuarioEncontrado.nombre} (${usuarioEncontrado.rol}) desde IP ${ip} en ${duracion}ms`);
 
     return res.status(200).json({
       ok: true,
@@ -98,7 +222,8 @@ const login = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Error en login:", error);
+    console.error("[SECURITY] Error en login:", error);
+    // No revelar detalles del error
     return res.status(500).json({
       ok: false,
       message: "Error interno del servidor",

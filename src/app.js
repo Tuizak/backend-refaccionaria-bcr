@@ -44,18 +44,24 @@ app.use(
 /* ─── RATE LIMITING ──────────────────────────────────────── */
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 10, // máximo 10 intentos por ventana
+  max: 5, // máximo 5 intentos por ventana (antes era 10)
   message: {
     ok: false,
-    message: "Demasiados intentos de inicio de sesión. Intenta de nuevo en 15 minutos.",
+    message: "Demasiados intentos de inicio de sesión. Tu IP ha sido bloqueada temporalmente.",
   },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => {
+    return req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
+      || req.headers["x-real-ip"]
+      || req.socket?.remoteAddress
+      || "unknown";
+  },
 });
 
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minuto
-  max: 100, // máximo 100 requests por minuto
+  max: 60, // máximo 60 requests por minuto (antes era 100)
   message: {
     ok: false,
     message: "Demasiadas solicitudes. Intenta de nuevo en un minuto.",
@@ -64,9 +70,32 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Rate limit estricto para endpoints de escritura
+const writeLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 20, // máximo 20 escrituras por minuto
+  message: {
+    ok: false,
+    message: "Demasiadas solicitudes de escritura. Espera un momento.",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 /* ─── BODY PARSERS ───────────────────────────────────────── */
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "100kb" })); // Limitar tamaño de body
+app.use(express.urlencoded({ extended: true, limit: "100kb" }));
+
+/* ─── SECURITY: Deshabilitar fingerprint del servidor ────── */
+app.disable("x-powered-by");
+
+/* ─── SECURITY: Prevenir cache de respuestas sensibles ───── */
+app.use("/api/auth", (req, res, next) => {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
+  next();
+});
 
 /**
  * Hace pública la carpeta uploads.
