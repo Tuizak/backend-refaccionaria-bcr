@@ -14,9 +14,12 @@ const crearSlug = (texto = "") => {
     .replace(/^-+|-+$/g, "");
 };
 
-/* GET /api/productos */
+/* GET /api/productos?sucursal=X */
 const obtenerProductos = async (req, res) => {
   try {
+    const { sucursal } = req.query;
+    const idSucursal = sucursal ? Number(sucursal) : null;
+
     const [productos] = await db.query(`
       SELECT 
         p.id_producto,
@@ -62,6 +65,20 @@ const obtenerProductos = async (req, res) => {
       ) compat ON compat.id_producto = p.id_producto
       ORDER BY p.id_producto DESC
     `);
+
+    if (idSucursal) {
+      const [stockRows] = await db.query(
+        "SELECT id_producto, stock FROM inventario_sucursal WHERE id_sucursal = ?",
+        [idSucursal]
+      );
+      const stockMap = {};
+      for (const row of stockRows) {
+        stockMap[row.id_producto] = row.stock;
+      }
+      for (const p of productos) {
+        p.stock_sucursal = stockMap[p.id_producto] || 0;
+      }
+    }
 
     return res.json(productos);
   } catch (error) {
@@ -1210,6 +1227,22 @@ const buscarProductosInteligente = async (req, res) => {
     sql += " ORDER BY p.nombre ASC LIMIT 50";
 
     const [rows] = await db.query(sql, params);
+
+    const { sucursal } = req.query;
+    const idSucursal = sucursal ? Number(sucursal) : null;
+    if (idSucursal) {
+      const [stockRows] = await db.query(
+        "SELECT id_producto, stock FROM inventario_sucursal WHERE id_sucursal = ?",
+        [idSucursal]
+      );
+      const stockMap = {};
+      for (const row of stockRows) {
+        stockMap[row.id_producto] = row.stock;
+      }
+      for (const r of rows) {
+        r.stock_sucursal = stockMap[r.id_producto] || 0;
+      }
+    }
 
     return res.status(200).json({ ok: true, data: rows });
   } catch (error) {
